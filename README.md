@@ -55,17 +55,21 @@ No instales nada más. En serio.
 Pasa, y está previsto. No preguntes, no te disculpes, no intentes alcanzar tecleando más
 rápido. Salta al último checkpoint y sigue:
 
+**En tu instancia:**
+
 ```bash
-git reset --hard s2      # el estado al cierre de la sesión 2
-git push --force
+./setup/run recuperar 2      # el estado al cierre de la sesión 2
 ```
 
-Y en tu instancia: `./setup/run sync`.
+Eso consulta el repositorio del curso y te deja exactamente ahí. Luego `git push --force`
+desde tu computadora para que tu fork quede igual.
 
 ⚠ Esto **descarta** lo que llevas sin guardar. Es a propósito: es más rápido volver al punto
-bueno que depurar en vivo.
+bueno que depurar en vivo. El comando te avisa qué se va a perder antes de hacerlo.
 
-Los checkpoints son `s1`, `s2`, `s3` y `s4`.
+> No uses `git reset --hard s2` a mano. Ese tag vive en **tu** fork y se quedó fijo en el
+> commit que existía cuando forkeaste: no se mueve aunque el curso publique correcciones.
+> `recuperar` lee del curso, así que siempre te trae la versión buena.
 
 ---
 
@@ -91,6 +95,8 @@ La sesión 2 es la más importante del módulo. Si vas a faltar a una, que no se
 ./setup/run status    # qué está corriendo y en qué puerto
 ./setup/run logs      # últimas líneas de los dos registros
 ./setup/run sync      # trae los cambios que empujaste desde tu laptop
+./setup/run actualizar 2   # trae el material para empezar la sesión 2
+./setup/run recuperar 1    # te deja como al cerrar la sesión 1
 ./setup/run url       # en qué dirección está tu tablero
 ./setup/run doctor    # revisa el entorno y dice qué falta
 ```

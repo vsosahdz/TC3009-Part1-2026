@@ -703,12 +703,13 @@ igual. Por eso hoy importaba el contrato: mañana cambia lo de adentro y el cont
 
 Desde tu laptop:
 
+**En la instancia:**
+
 ```bash
-git reset --hard s1
-git push --force
+./setup/run recuperar 1
 ```
 
-Y en la instancia: `./setup/run sync`.
+Y desde tu computadora, `git push --force` para que tu fork quede igual.
 
 Te deja en el estado correcto al cierre de esta sesión. Sin vergüenza: es más rápido que
 depurar en vivo, y es para lo que existen los checkpoints.

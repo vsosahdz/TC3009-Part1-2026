@@ -15,6 +15,7 @@
 #   ./setup/run sync         trae los cambios que empujaste desde tu laptop
 #   ./setup/run actualizar 2 trae el material para empezar la sesion 2
 #   ./setup/run recuperar 1  te deja como al cerrar la sesion 1 (descarta tu avance)
+#                            agrega --si para no preguntar
 #   ./setup/run url          en que direccion esta tu tablero
 #   ./setup/run doctor       revisa el entorno y dice que falta
 #
@@ -344,9 +345,20 @@ case "${1:-}" in
       aviso "esto se va a DESCARTAR:"
       echo "$sucio" | sed 's|^|        |'
       echo
-      printf "  ¿Seguro? Escribe 's' para continuar: "
-      read -r respuesta
-      [[ "$respuesta" == "s" ]] || { echo "  cancelado."; exit 1; }
+      if [[ "${3:-}" == "--si" ]]; then
+        echo "  (--si: se continua sin preguntar)"
+      elif [[ -t 0 ]]; then
+        printf "  ¿Seguro? Escribe 's' para continuar: "
+        read -r respuesta
+        [[ "$respuesta" == "s" ]] || { echo "  cancelado."; exit 1; }
+      else
+        # Sin terminal no hay a quien preguntarle. Abortar es mejor que
+        # colgarse esperando una respuesta que nunca llega.
+        mal "hay cambios sin confirmar y no hay terminal para preguntarte."
+        echo "        Haz commit primero, o pasa --si para descartarlos:"
+        echo "            ./setup/run recuperar $sesion --si"
+        exit 1
+      fi
     fi
 
     git reset --hard -q "$REF"

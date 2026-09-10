@@ -25,19 +25,14 @@ necesitas tu instancia ya creada y aprovisionada.**
 
 ### Si ya tienes tu instancia funcionando
 
-**En tu computadora:**
-
-```bash
-git reset --hard s1
-git push --force
-```
-
 **En la instancia:**
 
 ```bash
-./setup/run sync
+./setup/run recuperar 1
 ./setup/run start
 ```
+
+Y desde tu computadora, `git push --force` para que tu fork quede igual.
 
 Eso te deja con **la sesión 1 completa** —el tablero funcionando— y con el esqueleto de la
 sesión 2 listo para llenar. No tienes que reinstalar nada: las dependencias del modelo
@@ -671,9 +666,10 @@ Pero lo de hoy es lo que te llevas al reto. **La costura es el módulo.**
 
 **En tu computadora:**
 
+**En la instancia:**
+
 ```bash
-git reset --hard s2
-git push --force
+./setup/run recuperar 2
 ```
 
-Y en la instancia: `./setup/run sync && ./setup/run restart`.
+Y desde tu computadora, `git push --force` para que tu fork quede igual.
