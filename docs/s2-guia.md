@@ -90,6 +90,19 @@ El curso publicó los archivos de esta sesión. Tráelos **sin pisar tu código*
 ./setup/run actualizar 2
 ```
 
+> **Si eso falla porque hiciste fork antes de que existiera esta sesión**, tu copia de los
+> comandos es la vieja. Actualízala primero y vuelve a intentar:
+>
+> ```bash
+> git remote add curso https://github.com/vsosahdz/TC3009-Part1-2026.git
+> git fetch --force --tags curso
+> git checkout curso/main -- setup/
+> ./setup/run actualizar 2
+> ```
+>
+> Pasa una sola vez. De aquí en adelante `actualizar` lee del curso directamente y no
+> depende de lo que tenga tu fork.
+
 Eso trae las guías, el notebook y los esqueletos nuevos, y **conserva intacto lo que
 escribiste** en la sesión 1. El reparto de quién es dueño de qué archivo está en
 `setup/archivos-del-curso.txt`, para que lo puedas revisar.
