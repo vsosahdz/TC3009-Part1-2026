@@ -14,6 +14,7 @@
 #   ./setup/run logs api     sigue el registro de la API en vivo
 #   ./setup/run sync         trae los cambios que empujaste desde tu laptop
 #   ./setup/run actualizar 2 trae el material para empezar la sesion 2
+#   ./setup/run recuperar 1  te deja como al cerrar la sesion 1 (descarta tu avance)
 #   ./setup/run url          en que direccion esta tu tablero
 #   ./setup/run doctor       revisa el entorno y dice que falta
 #
@@ -238,7 +239,13 @@ case "${1:-}" in
 
     CURSO="https://github.com/vsosahdz/TC3009-Part1-2026.git"
     LISTA="$REPO_DIR/setup/archivos-del-curso.txt"
-    REF="s$((sesion - 1))"
+
+    # Se lee de la RAMA remota del curso, no de un tag local.
+    #
+    # Un tag local se queda pegado: si hiciste fork cuando ese tag apuntaba a
+    # otro commit, ningun 'git fetch --tags' lo mueve, y el material nuevo no
+    # te llega nunca. Una rama remota se actualiza siempre al hacer fetch.
+    REF="curso/estado/s$((sesion - 1))"
 
     cd "$REPO_DIR"
 
@@ -247,11 +254,14 @@ case "${1:-}" in
       ok "remoto 'curso' agregado"
     fi
 
-    echo "  trayendo el material del curso (checkpoint $REF)..."
-    git fetch -q --tags curso || { mal "no se pudo contactar al repositorio del curso"; exit 1; }
+    echo "  trayendo el material del curso ($REF)..."
+    # --force por si acaso: reescribe tags viejos que hayan quedado pegados.
+    git fetch -q --force --tags curso \
+      || { mal "no se pudo contactar al repositorio del curso"; exit 1; }
 
-    if ! git rev-parse -q --verify "refs/tags/$REF" >/dev/null; then
-      mal "el curso no ha publicado el checkpoint $REF todavia"
+    if ! git rev-parse -q --verify "$REF" >/dev/null; then
+      mal "el curso no ha publicado el estado de la sesion $sesion todavia"
+      echo "        (busque la rama $REF)"
       exit 1
     fi
 
@@ -299,6 +309,53 @@ case "${1:-}" in
     echo "  Revisa que llego:   git status"
     echo "  Instala lo nuevo:   bash setup/bootstrap-ec2.sh"
     echo "  Y guardalo:         git add -A && git commit -m \"material de la sesion $sesion\""
+    ;;
+
+  recuperar)
+    # Te deja en el estado en que termina una sesion, descartando lo que lleves.
+    #
+    #   ./setup/run recuperar 1    como al cerrar la sesion 1
+    #
+    # Usa la rama remota del curso y no un tag local, por lo mismo que
+    # 'actualizar': un tag viejo en tu fork nunca se mueve solo.
+    sesion="${2:-}"
+    if ! [[ "$sesion" =~ ^[0-4]$ ]]; then
+      mal "dime al final de que sesion quieres quedar:  ./setup/run recuperar 1"
+      exit 1
+    fi
+
+    CURSO="https://github.com/vsosahdz/TC3009-Part1-2026.git"
+    REF="curso/estado/s$sesion"
+
+    cd "$REPO_DIR"
+    git remote get-url curso >/dev/null 2>&1 || git remote add curso "$CURSO"
+    echo "  consultando el curso..."
+    git fetch -q --force --tags curso \
+      || { mal "no se pudo contactar al repositorio del curso"; exit 1; }
+
+    if ! git rev-parse -q --verify "$REF" >/dev/null; then
+      mal "el curso no ha publicado el estado de la sesion $sesion todavia"
+      exit 1
+    fi
+
+    sucio="$(git status --porcelain)"
+    if [[ -n "$sucio" ]]; then
+      echo
+      aviso "esto se va a DESCARTAR:"
+      echo "$sucio" | sed 's|^|        |'
+      echo
+      printf "  ¿Seguro? Escribe 's' para continuar: "
+      read -r respuesta
+      [[ "$respuesta" == "s" ]] || { echo "  cancelado."; exit 1; }
+    fi
+
+    git reset --hard -q "$REF"
+    ok "estas en el estado al cierre de la sesion $sesion"
+    echo
+    echo "  Para que tu fork en GitHub quede igual:"
+    echo "      git push --force"
+    echo "  Y para levantar la aplicacion:"
+    echo "      ./setup/run start"
     ;;
 
   url)
