@@ -12,27 +12,22 @@
 // 8080. Puertos distintos = origenes distintos = el navegador aplica CORS.
 const API_BASE = `http://${window.location.hostname}:8080`;
 
-// ---------------------------------------------------------------------------
-// ESTADO DE ARRANQUE: lo que sigue esta por escribir.
-//
-// App.jsx importa de aqui, asi que hasta que termines este archivo el tablero
-// no va a poder pedir datos. Cuando lo acabes, cobra vida de golpe.
-// ---------------------------------------------------------------------------
+async function get(path, params = {}) {
+  const url = new URL(API_BASE + path);
+  Object.entries(params).forEach(([clave, valor]) => {
+    if (valor !== null && valor !== undefined && valor !== "") {
+      url.searchParams.set(clave, valor);
+    }
+  });
 
-// TODO sesion 1: la funcion get()
-//
-// Recibe una ruta y un objeto de parametros, arma la URL completa, hace la
-// peticion y devuelve el JSON.
-//
-// Dos cosas que tiene que hacer bien:
-//   - omitir los parametros vacios, para no mandar ?neighborhood= sin valor
-//   - lanzar un error si la respuesta no viene con codigo 200, para que la
-//     interfaz pueda mostrar el problema en lugar de quedarse en blanco
+  const respuesta = await fetch(url);
+  if (!respuesta.ok) {
+    throw new Error(`${respuesta.status} al pedir ${path}`);
+  }
+  return respuesta.json();
+}
 
-// TODO sesion 1: las tres funciones que consume App.jsx
-//
-//   getHealth()                      -> GET /api/health
-//   getStats(neighborhood)           -> GET /api/stats
-//   getData(neighborhood, limit)     -> GET /api/data
-//
-// Tienen que exportarse con esos nombres exactos: App.jsx ya las importa asi.
+export const getHealth = () => get("/api/health");
+export const getStats = (neighborhood) => get("/api/stats", { neighborhood });
+export const getData = (neighborhood, limit = 20) =>
+  get("/api/data", { neighborhood, limit });
