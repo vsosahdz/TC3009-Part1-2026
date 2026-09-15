@@ -32,15 +32,25 @@ export const getStats = (neighborhood) => get("/api/stats", { neighborhood });
 export const getData = (neighborhood, limit = 20) =>
   get("/api/data", { neighborhood, limit });
 
-// TODO 5 sesion 3: las funciones que faltan.
-//
-// El frontend de hoy necesita cuatro cosas mas del backend: leer el contrato,
-// predecir, explicar y traer el historial. Dos de ellas son POST, y hasta
-// ahora este archivo solo sabe hacer GET.
-//
-// Escribe aqui un helper post() --con el detalle de que si el backend devuelve
-// 400 con {"error": "..."}, ese mensaje tiene que llegar al usuario tal cual--
-// y las cuatro funciones. La guia trae el bloque completo.
-//
-// Hasta que este paso este hecho la pagina va a salir en blanco: las vistas
-// importan funciones que todavia no existen. Es lo esperado.
+// --- Sesion 3 ---
+
+async function post(path, cuerpo) {
+  const respuesta = await fetch(API_BASE + path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(cuerpo),
+  });
+  const datos = await respuesta.json().catch(() => ({}));
+  if (!respuesta.ok) {
+    // El backend dice QUE campo esta mal. Ese mensaje es para el usuario,
+    // asi que se propaga tal cual en lugar de un "error 400" generico.
+    throw new Error(datos.error || `${respuesta.status} al pedir ${path}`);
+  }
+  return datos;
+}
+
+export const getModel = () => get("/api/model");
+export const predecir = (entrada) => post("/api/predict", entrada);
+export const explicar = (entrada, prediccion) =>
+  post("/api/explain", { input: entrada, prediction: prediccion });
+export const getHistory = (limit = 50) => get("/api/history", { limit });
