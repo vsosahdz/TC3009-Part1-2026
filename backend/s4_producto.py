@@ -6,8 +6,6 @@ Aqui el servicio gana dos cosas que lo separan de un script que predice:
   · PALABRAS   la prediccion se explica, no solo se entrega
 
 Ninguna de las dos cambia el modelo. Las dos cambian el producto.
-
-Hay 4 TODO. La guia (docs/s4-guia.md) los lleva en orden.
 """
 
 import json
@@ -40,45 +38,44 @@ def conectar():
 def crear_esquema():
     """Crea la tabla si no existe. Idempotente.
 
-    TODO 1 sesion 4: la tabla.
-
-    Escribe el CREATE TABLE IF NOT EXISTS con estas columnas:
-
-        prediction_id  TEXT PRIMARY KEY
-        creado_en      TEXT NOT NULL
-        model_version  TEXT NOT NULL
-        prediccion     REAL NOT NULL
-        entrada        TEXT NOT NULL
-
-    Fijate en la ultima: se guarda el input COMPLETO, no solo el resultado.
-    Esa decision cuesta lo mismo hoy y es la que hace posible, mas adelante,
-    comparar lo que el modelo esta viendo contra lo que vio al entrenar. Sin
-    los inputs no hay nada que comparar.
+    Se guarda el input COMPLETO, no solo el resultado. Esa decision cuesta lo
+    mismo hoy y es la que hace posible, en la Parte 2, comparar lo que el
+    modelo esta viendo contra lo que vio al entrenar: eso es deteccion de
+    drift, y sin los inputs no hay nada que comparar.
 
     Nota de producto: registrar entradas crudas tiene implicaciones de datos
     personales en un sistema real. Aqui son casas; en tu reto puede que no.
     """
     with conectar() as con:
-        ...
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS predicciones (
+                prediction_id TEXT PRIMARY KEY,
+                creado_en     TEXT NOT NULL,
+                model_version TEXT NOT NULL,
+                prediccion    REAL NOT NULL,
+                entrada       TEXT NOT NULL
+            )
+            """
+        )
 
 
 crear_esquema()
 
 
 def registrar(prediction_id, model_version, prediccion, entrada):
-    """Guarda una prediccion.
-
-    TODO 2 sesion 4: el INSERT.
-
-    Cinco columnas, cinco valores, con ? por cada uno (nunca con formato de
-    cadena: eso es inyeccion de SQL).
-
-    Dos detalles:
-      · la hora la pone el servidor, en UTC, no el cliente
-      · 'entrada' es un diccionario y la columna es TEXT -> json.dumps
-    """
+    """Guarda una prediccion."""
     with conectar() as con:
-        ...
+        con.execute(
+            "INSERT OR REPLACE INTO predicciones VALUES (?, ?, ?, ?, ?)",
+            (
+                prediction_id,
+                datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                model_version,
+                float(prediccion),
+                json.dumps(entrada, ensure_ascii=False),
+            ),
+        )
 
 
 @bp.after_app_request
@@ -97,9 +94,6 @@ def registrar_si_fue_prediccion(respuesta):
 
     Es una idea que vas a reencontrar como middleware, interceptores o
     decoradores en casi cualquier framework.
-
-    Este metodo ya esta escrito. Leelo: es lo que hay que entender de la
-    sesion, y es lo que vas a querer copiar en tu reto.
 
     Un 400 no se registra: solo hay prediccion cuando hubo prediccion.
     """
@@ -123,11 +117,7 @@ def registrar_si_fue_prediccion(respuesta):
 
 
 def estado():
-    """Lo que este modulo aporta a /api/health.
-
-    Devuelve {"predicciones_registradas": <cuantas hay>}. Es la forma mas
-    rapida de saber, desde la terminal, si el registro esta funcionando.
-    """
+    """Lo que este modulo aporta a /api/health."""
     with conectar() as con:
         n = con.execute("SELECT COUNT(*) AS n FROM predicciones").fetchone()["n"]
     return {"predicciones_registradas": int(n)}
@@ -137,36 +127,43 @@ def estado():
 def history():
     """Lo que el modelo ha estado prediciendo.
 
-    TODO 3 sesion 4: el endpoint.
-
     Un tablero que solo muestra el dataset de entrenamiento envejece el primer
     dia. Este endpoint lo alimenta con el uso real del producto.
-
-    Lee ?limit= (por defecto 50), acotalo entre 1 y 500 --nunca dejes que el
-    cliente pida "todo"-- y devuelve:
-
-        {"count": n, "rows": [{prediction_id, created_at, model_version,
-                               prediction, input}, ...]}
-
-    Mas reciente primero. 'entrada' vuelve de la base como texto: json.loads.
     """
-    return jsonify({"count": 0, "rows": []})
+    try:
+        limite = int(request.args.get("limit", 50))
+    except ValueError:
+        limite = 50
+    limite = max(1, min(limite, 500))
+
+    with conectar() as con:
+        filas = con.execute(
+            "SELECT * FROM predicciones ORDER BY creado_en DESC, rowid DESC LIMIT ?",
+            (limite,),
+        ).fetchall()
+
+    return jsonify(
+        {
+            "count": len(filas),
+            "rows": [
+                {
+                    "prediction_id": f["prediction_id"],
+                    "created_at": f["creado_en"],
+                    "model_version": f["model_version"],
+                    "prediction": round(f["prediccion"], 2),
+                    "input": json.loads(f["entrada"]),
+                }
+                for f in filas
+            ],
+        }
+    )
 
 
 def redactar(entrada, prediccion):
     """Convierte una prediccion en una frase que un humano entiende.
 
-    TODO 4 sesion 4: la explicacion.
-
-    Usa las importancias del contrato (s2_modelo.contrato) para quedarte con
-    las 3 features que mas pesan, y compara el valor que mando el usuario
-    contra la mediana de esa feature en el contrato:
-
-        > mediana * 1.15   -> "por encima de lo habitual"
-        < mediana * 0.85   -> "por debajo de lo habitual"
-        si no              -> "en el rango habitual"
-
-    Es una PLANTILLA: no hay modelo de lenguaje aqui.
+    Usa las importancias del contrato y compara la casa contra el promedio de
+    su colonia. Es una PLANTILLA: no hay modelo de lenguaje aqui.
 
     La regla que importa, y que se conserva si un dia esto llama a un LLM:
 
@@ -174,7 +171,32 @@ def redactar(entrada, prediccion):
         esta funcion lo TRADUCE
         nunca lo cambia
     """
-    return f"El modelo estima {prediccion:,.0f} para esta casa."
+    contrato = s2_modelo.contrato
+    importancias = contrato.get("feature_importances", {})
+    top = [f for f, _ in sorted(importancias.items(), key=lambda kv: -kv[1])[:3]]
+
+    partes = []
+    for nombre in top:
+        valor = entrada.get(nombre)
+        if valor is None:
+            continue
+        ficha = next((f for f in contrato["features"] if f["name"] == nombre), None)
+        if ficha and ficha["type"] == "num" and "median" in ficha:
+            mediana = ficha["median"]
+            if valor > mediana * 1.15:
+                partes.append(f"{nombre} por encima de lo habitual ({valor:g})")
+            elif valor < mediana * 0.85:
+                partes.append(f"{nombre} por debajo de lo habitual ({valor:g})")
+            else:
+                partes.append(f"{nombre} en el rango habitual ({valor:g})")
+        else:
+            partes.append(f"{nombre} = {valor}")
+
+    detalle = "; ".join(partes) if partes else "los datos proporcionados"
+    return (
+        f"El modelo estima {prediccion:,.0f} para esta casa. "
+        f"Lo que mas pesa en esa estimacion es {detalle}."
+    )
 
 
 @bp.post("/api/explain")
@@ -184,8 +206,6 @@ def explain():
     Fijate en que NO vuelve a predecir por su cuenta: recibe el numero que ya
     dio el modelo. Si esta funcion calculara su propio valor, la explicacion
     podria contradecir lo que el usuario esta viendo.
-
-    Ya esta escrito.
     """
     payload = request.get_json(silent=True) or {}
     entrada = payload.get("input")
