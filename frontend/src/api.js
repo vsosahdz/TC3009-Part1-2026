@@ -31,3 +31,16 @@ export const getHealth = () => get("/api/health");
 export const getStats = (neighborhood) => get("/api/stats", { neighborhood });
 export const getData = (neighborhood, limit = 20) =>
   get("/api/data", { neighborhood, limit });
+
+// TODO 5 sesion 3: las funciones que faltan.
+//
+// El frontend de hoy necesita cuatro cosas mas del backend: leer el contrato,
+// predecir, explicar y traer el historial. Dos de ellas son POST, y hasta
+// ahora este archivo solo sabe hacer GET.
+//
+// Escribe aqui un helper post() --con el detalle de que si el backend devuelve
+// 400 con {"error": "..."}, ese mensaje tiene que llegar al usuario tal cual--
+// y las cuatro funciones. La guia trae el bloque completo.
+//
+// Hasta que este paso este hecho la pagina va a salir en blanco: las vistas
+// importan funciones que todavia no existen. Es lo esperado.
