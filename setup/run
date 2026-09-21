@@ -1,0 +1,615 @@
+#!/usr/bin/env bash
+#
+# Comandos del modulo.
+#
+# La consola del navegador es UNA SOLA, y los servidores ocupan la terminal
+# mientras corren. Por eso 'start' los levanta en segundo plano y te devuelve
+# el prompt: con una consola alcanza para todo.
+#
+#   ./setup/run start        levanta la API y el tablero en segundo plano
+#   ./setup/run stop         los detiene
+#   ./setup/run restart      stop + start  (lo que usas despues de cada sync)
+#   ./setup/run status       que esta corriendo y en que puerto
+#   ./setup/run logs         ultimas lineas de los dos registros
+#   ./setup/run logs api     sigue el registro de la API en vivo
+#   ./setup/run sync         trae los cambios que empujaste desde tu laptop
+#   ./setup/run actualizar 2 trae el material para empezar la sesion 2
+#   ./setup/run recuperar 1  te deja como al cerrar la sesion 1 (descarta tu avance)
+#                            agrega --si para no preguntar
+#   ./setup/run url          en que direccion esta tu tablero
+#   ./setup/run doctor       revisa el entorno y dice que falta
+#   ./setup/run test         corre el test de paridad notebook <-> servicio
+#
+#   ./setup/run api          arranca la API en PRIMER plano (para depurar)
+#   ./setup/run web          arranca el tablero en PRIMER plano (para depurar)
+#
+# No hace falta activar el entorno virtual: este script llama a
+# .venv/bin/python directamente. Activarlo tampoco estorba, pero no es
+# necesario y una activacion olvidada es una fuente de confusion menos.
+
+set -uo pipefail
+
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RUN_DIR="$REPO_DIR/.run"
+mkdir -p "$RUN_DIR"
+
+VERDE="\033[32m"; AMARILLO="\033[33m"; ROJO="\033[31m"; RESET="\033[0m"
+ok()    { echo -e "  ${VERDE}OK${RESET}    $1"; }
+aviso() { echo -e "  ${AMARILLO}AVISO${RESET} $1"; }
+mal()   { echo -e "  ${ROJO}FALLA${RESET} $1"; }
+
+# nvm es una funcion de shell, no un binario: hay que cargarla.
+# set +u porque nvm.sh referencia variables sin definir y abortaria el script.
+cargar_nvm() {
+  set +u
+  export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  # shellcheck source=/dev/null
+  [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+  set -u
+}
+
+ip_publica() {
+  local token ip
+  token=$(curl -sX PUT "http://169.254.169.254/latest/api/token" \
+    -H "X-aws-ec2-metadata-token-ttl-seconds: 60" --max-time 3 2>/dev/null || true)
+  ip=$(curl -s -H "X-aws-ec2-metadata-token: $token" --max-time 3 \
+    http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || true)
+  echo "$ip"
+}
+
+vive() {  # vive <servicio>  -> 0 si el proceso sigue corriendo
+  local pid_file="$RUN_DIR/$1.pid"
+  [[ -f "$pid_file" ]] || return 1
+  local pid
+  pid="$(cat "$pid_file" 2>/dev/null)"
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+# Puerto de cada servicio, para poder limpiar procesos huerfanos.
+puerto_de() { case "$1" in api) echo 8080 ;; web) echo 3000 ;; *) echo "" ;; esac; }
+
+# setsid le da al proceso su propio grupo, para poder matar tambien a sus
+# hijos: Flask en modo debug y Vite lanzan subprocesos, y sin eso quedarian
+# ocupando el puerto con el sintoma "Address already in use".
+# No existe en macOS, asi que se usa si esta y si no se sigue sin el; el
+# 'stop' limpia por puerto de todas formas.
+arrancar() {  # arrancar <servicio> <comando...>
+  local servicio="$1"; shift
+  if vive "$servicio"; then
+    aviso "$servicio ya estaba corriendo (pid $(cat "$RUN_DIR/$servicio.pid"))"
+    return 0
+  fi
+  if command -v setsid >/dev/null 2>&1; then
+    setsid nohup "$@" > "$RUN_DIR/$servicio.log" 2>&1 &
+  else
+    nohup "$@" > "$RUN_DIR/$servicio.log" 2>&1 &
+  fi
+  echo $! > "$RUN_DIR/$servicio.pid"
+  sleep 2
+  if vive "$servicio"; then
+    ok "$servicio arrancado (pid $(cat "$RUN_DIR/$servicio.pid"))"
+  else
+    mal "$servicio no arranco. Revisa:  ./setup/run logs $servicio"
+    return 1
+  fi
+}
+
+detener() {  # detener <servicio>
+  local servicio="$1"
+  local pid_file="$RUN_DIR/$servicio.pid"
+  local algo=0
+
+  if [[ -f "$pid_file" ]]; then
+    local pid
+    pid="$(cat "$pid_file" 2>/dev/null)"
+    if [[ -n "$pid" ]]; then
+      # Primero el grupo completo (si setsid lo creo), luego el proceso solo.
+      kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+      sleep 1
+      kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+      algo=1
+    fi
+    rm -f "$pid_file"
+  fi
+
+  # Barrido por puerto: atrapa a los hijos que sobrevivieron al padre.
+  local puerto huerfanos
+  puerto="$(puerto_de "$servicio")"
+  if [[ -n "$puerto" ]] && command -v lsof >/dev/null 2>&1; then
+    huerfanos="$(lsof -ti:"$puerto" 2>/dev/null || true)"
+    if [[ -n "$huerfanos" ]]; then
+      echo "$huerfanos" | xargs kill -KILL 2>/dev/null || true
+      algo=1
+    fi
+  fi
+
+  (( algo )) && ok "$servicio detenido" || echo "  $servicio no estaba corriendo"
+}
+
+exigir_entorno() {
+  if [[ ! -x "$REPO_DIR/.venv/bin/python" ]]; then
+    mal "no existe el entorno virtual. Corre:  bash setup/bootstrap-ec2.sh"
+    exit 1
+  fi
+}
+
+case "${1:-}" in
+
+  start)
+    exigir_entorno
+    arrancar api "$REPO_DIR/.venv/bin/python" "$REPO_DIR/backend/app.py"
+    cargar_nvm
+    if ! command -v npm >/dev/null 2>&1; then
+      mal "npm no disponible. Corre:  bash setup/bootstrap-ec2.sh"
+      exit 1
+    fi
+    arrancar web bash -c \
+      "export NVM_DIR=\"\$HOME/.nvm\"; [ -s \"\$NVM_DIR/nvm.sh\" ] && . \"\$NVM_DIR/nvm.sh\"; cd '$REPO_DIR/frontend' && npm run dev"
+    echo
+    ip="$(ip_publica)"
+    if [[ -n "$ip" ]]; then
+      echo "  Tablero: http://$ip:3000"
+      echo "  API:     http://$ip:8080/api/health"
+    fi
+    echo
+    echo "  Tu terminal quedo libre. Si algo no responde:  ./setup/run logs"
+    ;;
+
+  stop)
+    detener web
+    detener api
+    ;;
+
+  restart)
+    "$0" stop
+    echo
+    "$0" start
+    ;;
+
+  status)
+    echo
+    for s in api web; do
+      if vive "$s"; then
+        ok "$s corriendo (pid $(cat "$RUN_DIR/$s.pid"))"
+      else
+        echo "  --    $s detenido"
+      fi
+    done
+    echo
+    curl -s -m 2 -o /dev/null -w "  API  :8080 -> %{http_code}\n" localhost:8080/api/health \
+      || echo "  API  :8080 -> sin respuesta"
+    curl -s -m 2 -o /dev/null -w "  Web  :3000 -> %{http_code}\n" localhost:3000 \
+      || echo "  Web  :3000 -> sin respuesta"
+    echo
+    ;;
+
+  logs)
+    servicio="${2:-}"
+    if [[ -n "$servicio" ]]; then
+      [[ -f "$RUN_DIR/$servicio.log" ]] || { mal "no hay registro de '$servicio'"; exit 1; }
+      echo "Siguiendo $servicio. Ctrl+C para salir."
+      exec tail -f "$RUN_DIR/$servicio.log"
+    fi
+    for s in api web; do
+      echo "===== $s ====="
+      [[ -f "$RUN_DIR/$s.log" ]] && tail -n 15 "$RUN_DIR/$s.log" || echo "(sin registro)"
+      echo
+    done
+    ;;
+
+  api)
+    exigir_entorno
+    echo "API en el puerto 8080, en primer plano. Ctrl+C para detener."
+    exec "$REPO_DIR/.venv/bin/python" "$REPO_DIR/backend/app.py"
+    ;;
+
+  web)
+    cargar_nvm
+    command -v npm >/dev/null 2>&1 || { mal "npm no disponible. Corre: bash setup/bootstrap-ec2.sh"; exit 1; }
+    [[ -d "$REPO_DIR/frontend/node_modules" ]] \
+      || { mal "faltan dependencias del frontend. Corre: bash setup/bootstrap-ec2.sh"; exit 1; }
+    echo "Tablero en el puerto 3000, en primer plano. Ctrl+C para detener."
+    cd "$REPO_DIR/frontend" && exec npm run dev
+    ;;
+
+  sync)
+    # Trae a la instancia lo que empujaste desde tu computadora.
+    #
+    # Es un ESPEJO, no un merge: la instancia solo ejecuta, nunca edita, asi
+    # que su copia no tiene nada propio que conservar.
+    #
+    # Antes esto era 'git pull' a secas, y fallaba justo cuando mas falta hace:
+    # despues de un 'recuperar' + 'push --force' la historia de tu fork cambia,
+    # 'git pull' se planta con "Need to specify how to reconcile divergent
+    # branches", y la instancia se queda con el codigo viejo sin que se note.
+    cd "$REPO_DIR"
+
+    rama="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+    git fetch -q origin || { mal "no se pudo contactar a tu fork en GitHub"; exit 1; }
+
+    if ! git rev-parse -q --verify "origin/$rama" >/dev/null; then
+      mal "tu fork no tiene la rama '$rama'"
+      echo "        Ramas disponibles:"
+      git branch -r | sed 's|^|            |'
+      exit 1
+    fi
+
+    sucio="$(git status --porcelain)"
+    if [[ -n "$sucio" ]]; then
+      aviso "hay cambios locales en la instancia; se descartan:"
+      echo "$sucio" | sed 's|^|        |'
+      echo "        La instancia solo ejecuta. El codigo se edita en tu computadora."
+      echo
+    fi
+
+    antes="$(git rev-parse HEAD)"
+    git reset --hard -q "origin/$rama"
+    despues="$(git rev-parse HEAD)"
+
+    if [[ "$antes" == "$despues" ]]; then
+      ok "ya estabas al dia ($(git log --oneline -1))"
+    else
+      ok "actualizado: $(git log --oneline -1)"
+      echo
+      echo "  Para que los cambios se vean:  ./setup/run restart"
+    fi
+    ;;
+
+  actualizar)
+    # Trae el material que necesitas para empezar una sesion, sin pisar el
+    # codigo que ya escribiste.
+    #
+    #   ./setup/run actualizar 2    prepara la sesion 2
+    #
+    # El esqueleto de la sesion N vive en el checkpoint s(N-1): es el estado en
+    # que termina la sesion anterior. Leer de 'main' no serviria, porque main
+    # apunta al estado de arranque y ahi el esqueleto todavia no existe.
+    #
+    # Quien es dueño de que archivo esta en setup/archivos-del-curso.txt.
+    sesion="${2:-}"
+    if [[ -z "$sesion" ]]; then
+      mal "dime que sesion vas a empezar:  ./setup/run actualizar 2"
+      exit 1
+    fi
+    if ! [[ "$sesion" =~ ^[1-4]$ ]]; then
+      mal "la sesion debe ser un numero del 1 al 4"
+      exit 1
+    fi
+
+    CURSO="https://github.com/vsosahdz/TC3009-Part1-2026.git"
+
+    # Se lee de la RAMA remota del curso, no de un tag local.
+    #
+    # Un tag local se queda pegado: si hiciste fork cuando ese tag apuntaba a
+    # otro commit, ningun 'git fetch --tags' lo mueve, y el material nuevo no
+    # te llega nunca. Una rama remota se actualiza siempre al hacer fetch.
+    REF="curso/estado/s$((sesion - 1))"
+
+    cd "$REPO_DIR"
+
+    if ! git remote get-url curso >/dev/null 2>&1; then
+      git remote add curso "$CURSO"
+      ok "remoto 'curso' agregado"
+    fi
+
+    echo "  trayendo el material del curso ($REF)..."
+    # --force por si acaso: reescribe tags viejos que hayan quedado pegados.
+    git fetch -q --force --tags curso \
+      || { mal "no se pudo contactar al repositorio del curso"; exit 1; }
+
+    if ! git rev-parse -q --verify "$REF" >/dev/null; then
+      mal "el curso no ha publicado el estado de la sesion $sesion todavia"
+      echo "        (busque la rama $REF)"
+      exit 1
+    fi
+
+    if [[ -n "$(git status --porcelain)" ]]; then
+      aviso "tienes cambios sin confirmar. Se van a conservar, pero conviene"
+      echo "        hacer commit antes de actualizar."
+      echo
+    fi
+
+    # La tabla de propiedad se lee del CURSO, no de tu copia local.
+    #
+    # Son dos razones, y la segunda es un bug que costo encontrar:
+    #
+    #   1. La tabla es [DEL CURSO]: la version buena es siempre la del curso.
+    #      Si una sesion nueva cambia de dueño un archivo, ese cambio tiene que
+    #      aplicar YA, no a partir de la proxima vez.
+    #
+    #   2. Leyendola del disco, este mismo bucle la estaba pisando a media
+    #      lectura. 'git checkout -- setup/' reemplaza el archivo --inodo
+    #      nuevo-- mientras el 'while read' sigue leyendo el inodo viejo. El
+    #      resultado es que la tabla nueva no surtia efecto hasta correr
+    #      'actualizar' DOS veces, y el sintoma --un archivo que dice
+    #      "conservado" cuando debia actualizarse-- no apunta a la causa por
+    #      ningun lado.
+    #
+    # Leerla en memoria antes de tocar nada elimina las dos cosas.
+    LISTA_TXT="$(git show "$REF:setup/archivos-del-curso.txt" 2>/dev/null)" \
+      || LISTA_TXT="$(cat "$REPO_DIR/setup/archivos-del-curso.txt")"
+
+    seccion=""
+    traidos=0
+    conservados=0
+
+    while IFS= read -r linea || [[ -n "$linea" ]]; do
+      linea="${linea%%#*}"
+      linea="$(echo "$linea" | xargs || true)"
+      [[ -z "$linea" ]] && continue
+
+      case "$linea" in
+        "[DEL CURSO]") seccion="curso"; continue ;;
+        "[TUYOS]")     seccion="tuyo";  continue ;;
+      esac
+
+      if [[ "$seccion" == "curso" ]]; then
+        # Siempre: son archivos que tu no editas.
+        if git checkout "$REF" -- "$linea" 2>/dev/null; then
+          echo "    actualizado  $linea"
+          traidos=$((traidos + 1))
+        fi
+      else
+        # Solo si no existe: tu codigo no se toca nunca.
+        if [[ -e "$linea" ]]; then
+          echo "    conservado   $linea  (ya lo tienes)"
+          conservados=$((conservados + 1))
+        elif git checkout "$REF" -- "$linea" 2>/dev/null; then
+          echo "    nuevo        $linea"
+          traidos=$((traidos + 1))
+        fi
+      fi
+    done <<< "$LISTA_TXT"
+
+    echo
+    ok "$traidos rutas traidas del curso, $conservados conservadas tal cual"
+    echo
+    echo "  Revisa que llego:   git status"
+    echo "  Instala lo nuevo:   bash setup/bootstrap-ec2.sh"
+    echo "  Y guardalo:         git add -A && git commit -m \"material de la sesion $sesion\""
+    ;;
+
+  recuperar)
+    # Te deja en el estado en que termina una sesion, pase lo que pase.
+    #
+    #   ./setup/run recuperar 2        como al cerrar la sesion 2
+    #   ./setup/run recuperar 2 --si   sin preguntar
+    #
+    # Esta pensado para el peor caso: un repositorio en cualquier estado, con
+    # una copia vieja de estos mismos comandos, y un alumno con prisa.
+    #
+    # Tres garantias:
+    #
+    #   1. NO PIERDES NADA. Todo lo que tengas --confirmado o no-- queda en una
+    #      rama 'respaldo/<fecha>' antes de tocar nada.
+    #   2. CONSERVAS TU ARTEFACTO. artifacts/ es tuyo y se restaura despues del
+    #      reset. El curso nunca publica un artefacto, asi que sin esto un
+    #      'recuperar' costaba volver a correr el notebook.
+    #   3. LA HERRAMIENTA SE ACTUALIZA PRIMERO. Si tu copia de setup/ es vieja,
+    #      se trae la del curso y este comando se vuelve a lanzar con ella. Asi
+    #      un fork de hace tres semanas se repara igual que uno de hoy.
+    sesion="${2:-}"
+    if ! [[ "$sesion" =~ ^[0-4]$ ]]; then
+      mal "dime al final de que sesion quieres quedar:  ./setup/run recuperar 2"
+      exit 1
+    fi
+
+    CURSO="https://github.com/vsosahdz/TC3009-Part1-2026.git"
+    REF="curso/estado/s$sesion"
+
+    cd "$REPO_DIR"
+    git remote get-url curso >/dev/null 2>&1 || git remote add curso "$CURSO"
+    [[ -n "${TC3009_RELANZADO:-}" ]] || echo "  consultando el curso..."
+    git fetch -q --force --tags curso \
+      || { mal "no se pudo contactar al repositorio del curso"; exit 1; }
+
+    if ! git rev-parse -q --verify "$REF" >/dev/null; then
+      mal "el curso no ha publicado el estado de la sesion $sesion todavia"
+      exit 1
+    fi
+
+    # --- Garantia 3: la herramienta, primero ---
+    #
+    # Si tu setup/ es anterior, lo de abajo seria la version vieja de este
+    # mismo codigo. Se trae la del curso y se relanza el comando con ella.
+    # El centinela evita que esto se repita para siempre.
+    if [[ -z "${TC3009_RELANZADO:-}" ]]; then
+      git checkout -q "$REF" -- setup/ 2>/dev/null || true
+      export TC3009_RELANZADO=1
+      exec "$REPO_DIR/setup/run" recuperar "$sesion" "${3:-}"
+    fi
+
+    # --- Garantia 1: nada se pierde ---
+    sucio="$(git status --porcelain)"
+    if [[ -n "$sucio" ]]; then
+      echo
+      aviso "tienes cambios sin confirmar:"
+      echo "$sucio" | sed 's|^|        |'
+      echo
+      echo "  No se van a perder: quedan en una rama de respaldo."
+      echo
+      if [[ "${3:-}" == "--si" ]]; then
+        :
+      elif [[ -t 0 ]]; then
+        printf "  ¿Continuo? Escribe 's': "
+        read -r respuesta
+        [[ "$respuesta" == "s" ]] || { echo "  cancelado."; exit 1; }
+      else
+        mal "no hay terminal para preguntarte. Pasa --si:"
+        echo "            ./setup/run recuperar $sesion --si"
+        exit 1
+      fi
+    fi
+
+    RESPALDO="respaldo/$(date +%Y%m%d-%H%M%S)"
+    export GIT_AUTHOR_NAME="${GIT_AUTHOR_NAME:-$(git config user.name 2>/dev/null || echo Alumno)}"
+    export GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-$(git config user.email 2>/dev/null || echo alumno@local)}"
+    export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+    export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+
+    if [[ -n "$sucio" ]]; then
+      git add -A
+      git commit -q -m "respaldo automatico antes de recuperar $sesion" || true
+    fi
+    git branch "$RESPALDO"
+    ok "tu trabajo quedo guardado en la rama  $RESPALDO"
+
+    # --- El reset ---
+    git reset --hard -q "$REF"
+
+    # --- Garantia 2: el artefacto es tuyo ---
+    #
+    # El curso publica artifacts/ vacio a proposito: si mandara uno, chocaria
+    # con el de cada alumno. Por eso el reset lo borra, y por eso hay que
+    # devolverlo. Son 10 minutos de Colab.
+    if git cat-file -e "$RESPALDO:artifacts/pipeline.joblib" 2>/dev/null; then
+      if git checkout "$RESPALDO" -- artifacts/ 2>/dev/null; then
+        # Y se confirma. 'git checkout <rama> -- ruta' solo deja los archivos
+        # en el indice: sin este commit, el 'git push --force' de abajo subiria
+        # un fork SIN artefacto, y el alumno lo descubriria en la instancia.
+        git commit -q -m "conservar mi artefacto tras recuperar $sesion" || true
+        ok "tu artefacto se conservo (artifacts/)"
+      else
+        aviso "no se pudo restaurar artifacts/; esta en $RESPALDO"
+      fi
+    fi
+
+    echo
+    ok "estas en el estado al cierre de la sesion $sesion"
+
+    # --- Verificacion: 'reparado' es algo que se comprueba, no que se espera ---
+    echo
+    echo "  Esto es lo que tienes ahora:"
+    for f in backend/s1_tablero.py backend/s2_modelo.py \
+             backend/s4_producto.py frontend/src/api.js \
+             frontend/src/vistas/Predecir.jsx frontend/src/vistas/Historial.jsx; do
+      [[ -f "$f" ]] || continue
+      n="$(grep -c 'TODO.*sesion' "$f" 2>/dev/null || true)"
+      if [[ "${n:-0}" == "0" ]]; then
+        printf "      %-38s resuelto\n" "$f"
+      else
+        printf "      %-38s %s TODO por llenar\n" "$f" "$n"
+      fi
+    done
+    if [[ -f artifacts/pipeline.joblib ]]; then
+      echo "      artifacts/pipeline.joblib              tu modelo, intacto"
+    else
+      echo "      artifacts/pipeline.joblib              FALTA: corre el notebook"
+    fi
+
+    echo
+    echo "  Lo que sigue:"
+    echo "      git push --force          para que tu fork quede igual"
+    echo "      ./setup/run sync          en la instancia, para traerlo"
+    echo
+    echo "  Si te arrepientes:  git reset --hard $RESPALDO"
+    ;;
+
+  test)
+    # Corre las pruebas del proyecto.
+    #
+    # Existe por la misma razon que el resto de los comandos: invocar
+    # .venv/bin/python a mano depende de en que carpeta estes parado, y el
+    # error que da --"No such file or directory"-- no dice eso.
+    exigir_entorno
+    cd "$REPO_DIR"
+
+    # Sin argumento corre TODAS las pruebas que tengas. Con nombre, solo esa:
+    #
+    #   ./setup/run test            todas
+    #   ./setup/run test paridad    solo la paridad notebook <-> servicio
+    #
+    # Que el comando sin argumento las corra todas importa: una prueba que
+    # llega en una sesion nueva y nadie invoca nunca es una prueba que no
+    # existe.
+    if [[ -z "${2:-}" ]]; then
+      salida_total=0
+      for f in "$REPO_DIR"/tests/test_*.py; do
+        [[ -e "$f" ]] || continue
+        "$REPO_DIR/.venv/bin/python" "$f" || salida_total=1
+      done
+      exit "$salida_total"
+    fi
+
+    cual="$2"
+    archivo="$REPO_DIR/tests/test_${cual}.py"
+
+    if [[ ! -f "$archivo" ]]; then
+      mal "no existe tests/test_${cual}.py"
+      echo "        Disponibles:"
+      for f in "$REPO_DIR"/tests/test_*.py; do
+        [[ -e "$f" ]] || continue
+        n="$(basename "$f" .py)"; n="${n#test_}"
+        echo "            ./setup/run test $n"
+      done
+      exit 1
+    fi
+
+    exec "$REPO_DIR/.venv/bin/python" "$archivo"
+    ;;
+
+  url)
+    ip="$(ip_publica)"
+    [[ -n "$ip" ]] || { mal "no se pudo obtener la IP publica de la instancia"; exit 1; }
+    echo "  Tablero: http://$ip:3000"
+    echo "  API:     http://$ip:8080/api/health"
+    ;;
+
+  doctor)
+    echo
+    echo "Revisando el entorno del modulo"
+    echo "==============================================="
+    echo "  proyecto : $REPO_DIR"
+    echo "  usuario  : $(whoami)"
+    echo "  HOME     : $HOME"
+    echo
+
+    command -v git >/dev/null 2>&1 && ok "git $(git --version | awk '{print $3}')" || mal "git no encontrado"
+    command -v python3 >/dev/null 2>&1 && ok "$(python3 --version)" || mal "python3 no encontrado"
+
+    if [[ -x "$REPO_DIR/.venv/bin/python" ]]; then
+      ok "entorno virtual en .venv/  (no hace falta activarlo)"
+      if "$REPO_DIR/.venv/bin/python" -c "import flask, pandas, sklearn" 2>/dev/null; then
+        ok "bibliotecas de Python instaladas"
+      else
+        mal "faltan bibliotecas. Corre: bash setup/bootstrap-ec2.sh"
+      fi
+    else
+      mal "no existe .venv/. Corre: bash setup/bootstrap-ec2.sh"
+    fi
+
+    cargar_nvm
+    if command -v node >/dev/null 2>&1; then
+      ok "node $(node --version)"
+    else
+      mal "node no disponible ni tras cargar nvm. Corre: bash setup/bootstrap-ec2.sh"
+    fi
+
+    [[ -d "$REPO_DIR/frontend/node_modules" ]] \
+      && ok "dependencias del frontend instaladas" \
+      || mal "falta frontend/node_modules. Corre: bash setup/bootstrap-ec2.sh"
+
+    remoto="$(cd "$REPO_DIR" && git remote get-url origin 2>/dev/null || echo '?')"
+    if [[ "$remoto" == *"vsosahdz/TC3009-Part1-2026"* ]]; then
+      aviso "tu remoto apunta al repositorio del CURSO, no a tu fork:"
+      echo "        $remoto"
+      echo "        Vas a poder trabajar, pero el git push final va a fallar."
+    else
+      ok "remoto: $remoto"
+    fi
+
+    ip="$(ip_publica)"
+    [[ -n "$ip" ]] && ok "IP publica: $ip" || aviso "sin IP publica"
+
+    echo
+    for s in api web; do
+      vive "$s" && ok "$s corriendo" || echo "  --    $s detenido  (levantalo con: ./setup/run start)"
+    done
+    echo
+    ;;
+
+  *)
+    sed -n '3,25p' "${BASH_SOURCE[0]}" | sed 's|^# \{0,1\}||'
+    exit 1
+    ;;
+esac
