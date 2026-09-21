@@ -22,25 +22,49 @@ export default function Predecir() {
   // El formulario NO tiene una lista de campos escrita a mano: se construye
   // con lo que dice el contrato del modelo. Si el modelo gana una feature,
   // aqui aparece un campo. Si cambia el rango, cambia la ayuda.
-  // TODO 6 sesion 3: leer el contrato al montar la vista.
-  //
-  // Pide /api/model con getModel(), guardalo en 'contrato', y arma los valores
-  // iniciales: la mediana si la feature es numerica, el primer valor permitido
-  // si es categorica. Un fallo aqui deja la vista inservible, asi que tiene que
-  // acabar en setError con un mensaje que diga que no se pudo leer el contrato.
-  useEffect(() => {}, []);
+  useEffect(() => {
+    getModel()
+      .then((c) => {
+        setContrato(c);
+        const iniciales = {};
+        for (const f of c.features) {
+          iniciales[f.name] = f.type === "num" ? f.median : f.allowed[0];
+        }
+        setValores(iniciales);
+      })
+      .catch((e) => setError(`No se pudo leer el contrato del modelo: ${e.message}`));
+  }, []);
 
-  // TODO 7 sesion 3: enviar el formulario.
-  //
-  // Tres estados, y los tres tienen que verse: enviando, error, resultado.
-  //
-  //   · evento.preventDefault(), o el navegador recarga la pagina
-  //   · si ya hay un envio en curso, no mandes otro
-  //   · limpia el resultado anterior antes de pedir el nuevo
-  //   · la explicacion y la referencia se piden DESPUES y por separado: si
-  //     cualquiera falla, el usuario se queda con su precio igual
   async function enviar(evento) {
     evento.preventDefault();
+    if (enviando) return; // sin envios duplicados mientras hay uno en curso
+
+    setEnviando(true);
+    setError(null);
+    setResultado(null);
+    setExplicacion(null);
+    setReferencia(null);
+
+    try {
+      const r = await predecir(valores);
+      setResultado(r);
+
+      // Las dos peticiones de contexto van DESPUES y por separado: si
+      // cualquiera falla, el usuario se queda con su precio igual.
+      explicar(valores, r.prediction)
+        .then((e) => setExplicacion(e.explanation))
+        .catch(() => setExplicacion(null));
+
+      // Un precio solo no dice nada. Al lado del promedio de su colonia --que
+      // es el mismo /api/stats de la sesion 1-- ya es una decision.
+      getStats(valores.Neighborhood)
+        .then((s) => setReferencia(s))
+        .catch(() => setReferencia(null));
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setEnviando(false);
+    }
   }
 
   if (error && !contrato) {
@@ -64,13 +88,43 @@ export default function Predecir() {
             Diez campos. Son los que un vendedor conoce sin medir nada.
           </p>
 
-          {/* TODO 8 sesion 3: los campos.
-              Recorre contrato.features. Cada una trae 'name' y 'type'.
-              Las 'cat' llevan <select> con f.allowed; las 'num' un
-              <input type="number"> y debajo la ayuda con f.min y f.max.
-              Son inputs controlados: value sale de 'valores', onChange lo
-              actualiza. */}
-          <div className="campos"></div>
+          <div className="campos">
+            {contrato.features.map((f) => (
+              <label key={f.name} className="campo">
+                <span className="etiqueta-campo">{f.name}</span>
+
+                {f.type === "cat" ? (
+                  <select
+                    value={valores[f.name] ?? ""}
+                    onChange={(e) =>
+                      setValores({ ...valores, [f.name]: e.target.value })
+                    }
+                  >
+                    {f.allowed.map((v) => (
+                      <option key={v} value={v}>
+                        {v}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="number"
+                    step="any"
+                    value={valores[f.name] ?? ""}
+                    onChange={(e) =>
+                      setValores({ ...valores, [f.name]: e.target.value })
+                    }
+                  />
+                )}
+
+                {f.type === "num" && (
+                  <span className="ayuda-campo">
+                    entre {f.min.toLocaleString()} y {f.max.toLocaleString()}
+                  </span>
+                )}
+              </label>
+            ))}
+          </div>
 
           <button type="submit" className="primario" disabled={enviando}>
             {enviando ? "Consultando el modelo..." : "Estimar precio"}
