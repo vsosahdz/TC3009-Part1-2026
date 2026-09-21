@@ -13,17 +13,12 @@ const pesos = (n) =>
 const cuando = (iso) => new Date(iso).toLocaleString("es-MX");
 
 export default function Historial() {
-  // Arranca con una tabla vacia y no en null, para que la vista se vea desde
-  // el primer momento en lugar de quedarse en "Cargando..." hasta que escribas
-  // el TODO 5.
-  const [datos, setDatos] = useState({ count: 0, rows: [] });
+  const [datos, setDatos] = useState(null);
   const [error, setError] = useState(null);
 
-  // TODO 5 sesion 4: pedir el historial al montar.
-  //
-  // Una sola linea con getHistory(50). El mismo patron que ya usaste en el
-  // tablero de la sesion 1: pedir al montar, guardar, y manejar el error.
-  useEffect(() => {}, []);
+  useEffect(() => {
+    getHistory(50).then(setDatos).catch((e) => setError(e.message));
+  }, []);
 
   if (error) return <div className="estado error">{error}</div>;
   if (!datos) return <div className="estado">Cargando...</div>;
@@ -39,14 +34,39 @@ export default function Historial() {
         <h2>Predicciones recientes</h2>
         <p className="subtitulo">{datos.count} registradas</p>
 
-        {/* TODO 6 sesion 4: la tabla.
-            Si datos.rows viene vacio, un mensaje que diga que hacer, no un
-            "sin datos" a secas: el usuario acaba de llegar y no sabe que el
-            historial se llena desde la pestaña Predecir.
-            Si trae filas, una <table> dentro de <div className="scroll-x">
-            con cuando / colonia / superficie / calidad / estimado / modelo.
-            Las columnas de texto llevan className="txt". */}
-        <div className="vacio">Aquí va tu tabla (TODO 6).</div>
+        {datos.rows.length === 0 ? (
+          <div className="vacio">
+            Todavía no hay ninguna. Ve a <strong>Predecir</strong> y estima un
+            precio: va a aparecer aquí.
+          </div>
+        ) : (
+          <div className="scroll-x">
+            <table>
+              <thead>
+                <tr>
+                  <th className="txt">Cuándo</th>
+                  <th className="txt">Colonia</th>
+                  <th>Superficie</th>
+                  <th>Calidad</th>
+                  <th>Estimado</th>
+                  <th className="txt">Modelo</th>
+                </tr>
+              </thead>
+              <tbody>
+                {datos.rows.map((f) => (
+                  <tr key={f.prediction_id}>
+                    <td className="txt">{cuando(f.created_at)}</td>
+                    <td className="txt">{f.input.Neighborhood}</td>
+                    <td>{Number(f.input.GrLivArea).toLocaleString()}</td>
+                    <td>{f.input.OverallQual}</td>
+                    <td>{pesos(f.prediction)}</td>
+                    <td className="txt mono">{f.model_version}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </>
   );
