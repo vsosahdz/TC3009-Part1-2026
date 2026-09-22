@@ -1,0 +1,90 @@
+# Cierra solo los pull requests que llegan por equivocacion.
+#
+# Este repositorio tiene decenas de forks, y GitHub enseña un boton
+# "Compare & pull request" muy visible cada vez que un alumno empuja una rama
+# a su fork. Ese boton apunta AQUI, no a su repositorio. Un clic distraido
+# manda el trabajo de la practica al repositorio del curso.
+#
+# Cerrarlo a mano no escala, y dejarlo abierto es peor: el alumno se queda
+# creyendo que su entrega esta "en revision" cuando en realidad su fork ya
+# tenia todo. Esto responde en segundos y le dice donde mirar.
+#
+# NO es un muro: un reporte de error de verdad --titulo que lo diga-- se queda
+# abierto.
+name: Cerrar pull requests por equivocacion
+
+on:
+  pull_request_target:
+    types: [opened, reopened]
+
+permissions:
+  pull-requests: write
+  issues: write
+
+jobs:
+  cerrar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Avisar y cerrar
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const titulo = (pr.title || "").toLowerCase();
+            // Un PR de una rama del propio repositorio no viene de un alumno:
+            // viene del banner que GitHub le enseña al dueño tras publicar las
+            // ramas de estado. El mensaje tiene que ser otro.
+            const esDelCurso = pr.head.repo && pr.head.repo.full_name === pr.base.repo.full_name;
+
+            // Una escotilla: si de verdad reportan un error del material, se
+            // queda abierto. Sin esto, el unico canal seria cerrar la puerta.
+            if (/\b(error|bug|fallo|typo|errata|correccion|corrección)\b/.test(titulo)) {
+              await github.rest.issues.createComment({
+                ...context.repo, issue_number: pr.number,
+                body: "Parece un reporte de error del material, así que lo dejo abierto. Gracias — lo reviso.",
+              });
+              return;
+            }
+
+            const cuerpoDelCurso = [
+              "### Rama de estado del curso, no un cambio que revisar",
+              "",
+              "Este pull request salió del banner **«had recent pushes»** que GitHub enseña",
+              "después de publicar las ramas `estado/sN`. Esas ramas son los checkpoints del",
+              "curso y **no se fusionan a `main`**: `main` apunta al estado de arranque a",
+              "propósito, para que quien clone reciba los `TODO` sin resolver.",
+              "",
+              "La publicación se hace con `scripts/publicar-todos.sh`, nunca con un merge.",
+              "Cierro esto.",
+            ].join("\n");
+
+            const cuerpo = [
+              "### Esto llegó por el botón «Compare & pull request» 👋",
+              "",
+              "No pasa nada, y **no perdiste nada**: ese botón apunta al repositorio del curso,",
+              "pero tu trabajo ya está en tu fork desde que hiciste `git push`.",
+              "",
+              "**Compruébalo:** abre tu repositorio y busca tu rama en el selector de ramas.",
+              "Si está ahí, ya entregaste.",
+              "",
+              "**Para traerla a tu instancia:**",
+              "```bash",
+              "git fetch origin && git checkout -B practica origin/practica",
+              "```",
+              "",
+              "**Para traer material nuevo del curso**, nunca un pull request:",
+              "```bash",
+              "./setup/run actualizar 4",
+              "```",
+              "",
+              "Cierro este PR para que no se quede colgando. Si encontraste un error de verdad",
+              "en el material, vuelve a abrirlo con la palabra **error** en el título y lo leo.",
+            ].join("\n");
+
+            await github.rest.issues.createComment({
+              ...context.repo, issue_number: pr.number,
+              body: esDelCurso ? cuerpoDelCurso : cuerpo,
+            });
+            await github.rest.pulls.update({
+              ...context.repo, pull_number: pr.number, state: "closed",
+            });
